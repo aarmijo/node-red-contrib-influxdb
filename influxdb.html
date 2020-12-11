@@ -92,10 +92,12 @@
             token: {type: "password"}
         },
         label: function () {
+            this.influxdbVersion = this.influxdbVersion || '1.x';   // for compatibility
+            var version = "[v"+this.influxdbVersion+"] ";
             if (this.influxdbVersion === '1.8-flux' || this.influxdbVersion === '2.0') {
-                return this.name || "[v"+this.influxdbVersion+"] " + this.url;
+                return this.name ? version + this.name : version + this.url;
             } else {
-                return this.name || "[v1.x] " + this.hostname + ":" + this.port + "/" + this.database;
+                return this.name ? version + this.name : version + this.hostname + ":" + this.port + "/" + this.database;
             }
         },
         oneditprepare: function () {
@@ -307,7 +309,7 @@
         align: "right",
         label: function() {
             var influxNode = RED.nodes.node(this.influxdb);
-            return this.name || (influxNode ? influxNode.label() + " " + this.measurement: "influxdb");
+            return this.name || (influxNode ? influxNode.label() + " " + this.measurement : "influxdb");
         },
         labelStyle: function() {
             return this.name ? "node_label_italic" : "";

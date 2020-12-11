@@ -79,22 +79,33 @@ module.exports = function (RED) {
         }
     });
 
+    function isIntegerString(value) {
+        return /^-?\d+i$/.test(value);
+    }
+
+    function addFieldToPoint(point, name, value) {
+
+        if (name === 'time') {
+            point.timestamp(value);
+        } else if (typeof value === 'number') {
+            point.floatField(name, value);
+        } else if (typeof value === 'string') {
+            // string values with numbers ending with 'i' are considered integers            
+            if (isIntegerString(value)) {
+                value = parseInt(value.substring(0,value.length-1));
+                point.intField(name, value);
+            } else {
+                point.stringField(name, value);
+            }
+        } else if (typeof value === 'boolean') {
+            point.booleanField(name, value);
+        }
+    }
+
     function addFieldsToPoint(point, fields) {
         for (const prop in fields) {
             const value = fields[prop];
-            if (prop === 'time') {
-                point.timestamp(value);
-            } else if (typeof value === 'number') {
-                if (Number.isInteger(value)) {
-                    point.intField(prop, value);
-                } else {
-                    point.floatField(prop, value);
-                }
-            } else if (typeof value === 'string') {
-                point.stringField(prop, value);
-            } else if (typeof value === 'boolean') {
-                point.booleanField(prop, value);
-            }
+            addFieldToPoint(point, prop, value);
         }
     }
 
@@ -105,69 +116,66 @@ module.exports = function (RED) {
             node.error(RED._("influxdb.errors.nomeasurement"), msg);
             return;
         }
-        var point;
-        if (_.isArray(msg.payload) && msg.payload.length > 0) {
-            // array of arrays
-            if (_.isArray(msg.payload[0]) && msg.payload[0].length > 0) {
-                msg.payload.forEach(element => {
-                    point = new Point(measurement);
-
-                    var fields = element[0];
+        try {
+            if (_.isArray(msg.payload) && msg.payload.length > 0) {
+                // array of arrays
+                if (_.isArray(msg.payload[0]) && msg.payload[0].length > 0) {
+                    msg.payload.forEach(element => {
+                        let point = new Point(measurement);
+    
+                        let fields = element[0];
+                        addFieldsToPoint(point, fields);
+    
+                        let tags = element[1];
+                        for (const prop in tags) {
+                            point.tag(prop, tags[prop]);
+                        }
+                        node.client.writePoint(point);
+                    });
+                } else {
+                    // array of non-arrays, assume one point with both fields and tags
+                    let point = new Point(measurement);
+    
+                    let fields = msg.payload[0];
                     addFieldsToPoint(point, fields);
-
-                    var tags = element[1];
+    
+                    const tags = msg.payload[1];
                     for (const prop in tags) {
                         point.tag(prop, tags[prop]);
                     }
+    
+                    node.client.writePoint(point)
+                }
+            } else {
+                if (_.isPlainObject(msg.payload)) {
+                    let point = new Point(measurement);
+                    let fields = msg.payload;
+                    addFieldsToPoint(point, fields);
                     node.client.writePoint(point);
-                });
-            } else {
-                // array of non-arrays, assume one point with both fields and tags
-                point = new Point(measurement);
-
-                var fields = msg.payload[0];
-                addFieldsToPoint(point, fields);
-
-                const tags = msg.payload[1];
-                for (const prop in tags) {
-                    point.tag(prop, tags[prop]);
+                } else {
+                    // just a value
+                    let point = new Point(measurement);
+                    let value = msg.payload;
+                    addFieldToPoint(point, 'value', value);
+                    node.client.writePoint(point);
                 }
-
-                node.client.writePoint(point)
             }
-        } else {
-            if (_.isPlainObject(msg.payload)) {
-                point = new Point(measurement);
-                var fields = msg.payload;
-                addFieldsToPoint(point, fields);
-                node.client.writePoint(point);
-            } else {
-                // just a value
-                point = new Point(measurement);
-                var value = msg.payload;
-                if (typeof value === 'number') {
-                    if (Number.isInteger(value)) {
-                        point.intField('value', value);
-                    } else {
-                        point.floatField('value', value);
-                    }
-                } else if (typeof value === 'string') {
-                    point.stringField('value', value);
-                } else if (typeof value === 'boolean') {
-                    point.booleanField('value', value);
-                }
-                node.client.writePoint(point);
-            }
+    
+            // actual write happens here
+            node.client
+                .close()
+                .catch(error => {
+                    msg.influx_error = {
+                        errorMessage: error
+                    };
+                    node.error(error, msg);
+                })
+        } catch (error) {
+            msg.influx_error = {
+                errorMessage: error
+            };
+            node.error(error, msg);
         }
-
-        node.client
-            .close()
-            .catch(error => {
-                msg.influx_error = {
-                    errorMessage: error
-                };
-                node.error(error, msg);
-            })
     }
 
     function queryRows(msg, node) {
@@ -211,6 +219,15 @@ module.exports = function (RED) {
         this.org = n.org;
         this.bucket = n.bucket;
 
+        function setFieldIntegers(fields) {
+            for (const prop in fields) {
+                const value = fields[prop];
+                if (isIntegerString(value)) {
+                    fields[prop] = parseInt(value.substring(0,value.length-1));
+                }
+            } 
+        }
+
         if (!this.influxdbConfig) {
             this.error(RED._("influxdb.errors.missingconfig"));
             return;
@@ -243,7 +260,6 @@ module.exports = function (RED) {
                 // format payload to match new writePoints API
                 var points = [];
                 var point;
-                var timestamp;
                 if (_.isArray(msg.payload) && msg.payload.length > 0) {
                     // array of arrays
                     if (_.isArray(msg.payload[0]) && msg.payload[0].length > 0) {
@@ -253,6 +269,7 @@ module.exports = function (RED) {
                                 fields: nodeRedPoint[0],
                                 tags: nodeRedPoint[1]
                             }
+                            setFieldIntegers(point.fields)
                             if (point.fields.time) {
                                 point.timestamp = point.fields.time;
                                 delete point.fields.time;
@@ -266,6 +283,7 @@ module.exports = function (RED) {
                             fields: msg.payload[0],
                             tags: msg.payload[1]
                         };
+                        setFieldIntegers(point.fields)
                         if (point.fields.time) {
                             point.timestamp = point.fields.time;
                             delete point.fields.time;
@@ -278,12 +296,14 @@ module.exports = function (RED) {
                             measurement: measurement,
                             fields: msg.payload
                         };
+                        setFieldIntegers(point.fields)
                     } else {
                         // just a value
                         point = {
                             measurement: measurement,
                             fields: { value: msg.payload }
                         };
+                        setFieldIntegers(point.fields)
                     }
                     if (point.fields.time) {
                         point.timestamp = point.fields.time;
